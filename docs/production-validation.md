@@ -29,7 +29,7 @@ Production Clean builds use a bounded DuckDB build configuration (`5GB`, 2 threa
 
 ## Reproduction path
 
-From a fresh WSL2/Linux checkout of the completed project, follow `README.md` under **Production replay (WSL2/Linux)** through source preparation and execution, using `VERSION=git-b9de90a` and the same `REPLAY_ROOT`, `SOURCE_ROOT`, and `RUN_ROOT` layout shown there. The release checkout intentionally retains the post-`b9de90a` memory-safe validation/runtime fixes while the explicit `VERSION` keeps the measured artifact lineage label stable. A sanitized public release snapshot need not preserve the internal development commit graph; it contains the final memory-safe code and evidence while this explicit label preserves the measured production lineage.
+From a fresh WSL2/Linux checkout of the completed project, follow [Implementation & Reproduction Runbook](implementation-and-runbook.md) under **Production replay (WSL2/Linux)** through source preparation and execution, using `VERSION=git-b9de90a` and the same `REPLAY_ROOT`, `SOURCE_ROOT`, and `RUN_ROOT` layout shown there. The release checkout intentionally retains the post-`b9de90a` memory-safe validation/runtime fixes while the explicit `VERSION` keeps the measured artifact lineage label stable. A sanitized public release snapshot need not preserve the internal development commit graph; it contains the final memory-safe code and evidence while this explicit label preserves the measured production lineage.
 
 ```bash
 VERSION=git-b9de90a
