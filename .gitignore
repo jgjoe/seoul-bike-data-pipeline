@@ -1,0 +1,74 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+/credentials/
+/secrets/
+*.pem
+*.key
+*_credentials.json
+service-account*.json
+
+# Large or downloaded source data
+/data/raw/
+/data/landing/
+/data/source/
+/data/downloads/
+/data/production-sources/
+/data/production-run/
+/data/production-validation*/
+/data/warehouse/
+/raw/
+/downloads/
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.zip
+
+# Small synthetic/regression fixtures are allowed by the PRD
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.tsv
+!tests/fixtures/**/*.xls
+!tests/fixtures/**/*.xlsx
+!tests/fixtures/**/*.zip
+
+# Generated analytical storage
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite3
+!tests/fixtures/**/*.parquet
+
+# Airflow runtime state
+/.airflow/
+/airflow_home/
+/airflow-runtime/
+/logs/
+/airflow.cfg
+/airflow.db*
+/standalone_admin_password.txt
+/webserver_config.py
+
+# Python and tooling caches/build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tmp/
+.coverage
+htmlcov/
+.venv/
+.venv-airflow/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

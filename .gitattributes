@@ -1,0 +1,10 @@
+# Transformation SQL is textual source; keep its checkout representation stable.
+*.sql text eol=lf
+
+# Synthetic fixtures are hashed byte-for-byte by tests; never rewrite line endings.
+tests/fixtures/source/* -text
+
+# Public release archives contain product code/evidence only.
+/memory export-ignore
+/.claude export-ignore
+/AGENTS.md export-ignore
