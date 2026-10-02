@@ -1,95 +1,87 @@
-# Seoul Bike Data Pipeline
+# Seoul Bike Data Pipeline — 서울 공공자전거 데이터 파이프라인
 
-서울 따릉이 대여이력의 **source revision, schema drift, data quality, provenance, backfill, failure recovery**를 다루는 로컬 batch data reliability / DW 프로젝트다.
+**서울 따릉이 대여이력 78개월(2.41억 행)을 원천 변경 추적·품질 검사·부분 재처리·실패 복구까지 갖춰 처리하는 배치 데이터 파이프라인**
 
-**Stack / responsibility:** Python · DuckDB · Parquet · plain SQL · Apache Airflow — Python은 source/control/DQ, DuckDB는 analytical execution, Parquet은 immutable Clean storage, SQL은 warehouse/mart transformation, Airflow는 orchestration만 담당한다.
+서울시 공식 대여이력 2020-01~2026-06을 원천 파일 단위로 등록하고, 품질 검사를 거쳐 정제 데이터와 분석용 웨어하우스·마트로 만듭니다.
+원천 파일이 수정되면 전체를 다시 돌리지 않고 영향받은 월만 찾아 다시 처리하며, 검증을 통과한 결과만 공개합니다.
 
-구현 기준선은 [PRD v1.0 FINAL](docs/prd-v1.0-final.md)이며, 실제 production-scale 완료 증거는 [Production Validation](docs/production-validation.md)에 기록한다.
+---
 
-## What this project proves
+## 주요 기능
 
-- 서울시 공식 대여이력 **2020-01~2026-06, 78개월**을 immutable source identity와 함께 처리한다.
-- source가 수정되면 전체 재처리 대신 **영향받은 month만 탐지·재빌드**한다.
-- schema drift와 row-level/group-level DQ를 구분하고, 신뢰할 수 없는 row는 provenance를 유지한 채 quarantine한다.
-- Clean/fact/mart는 검증된 immutable version을 먼저 만든 뒤 **atomic current pointer**를 이동해 partial publish를 막는다.
-- CLI, tests, Airflow가 동일한 business layer를 호출해 backfill/retry semantics가 경로마다 달라지지 않게 한다.
-- 공식 station source가 실제 변경일을 제공하지 않는 한, snapshot 관측 시점 이상의 정확도를 주장하지 않는다.
+- **원천 등록** — 공식 파일을 불변(immutable) 원본으로 보관하고 manifest·해시로 식별
+- **품질 검사** — 스키마 변화와 행·그룹 단위 품질 문제를 나눠 판정하고, 믿을 수 없는 행은 출처 정보를 유지한 채 격리(quarantine)
+- **부분 재처리** — 원천이 바뀌면 영향받은 월만 탐지해 다시 빌드, 실패한 월만 재시도
+- **웨어하우스·마트** — DuckDB fact/dimension과 대여소-일자·출발지-도착지·원천 품질 마트를 plain SQL로 생성
+- **오케스트레이션** — Apache Airflow로 일정 실행, 기간 재처리, 실패 월 재시도, 실행 현황 확인
 
-## Architecture
+## 설계 판단
+
+### 월을 재처리 단위로 삼았다
+
+서울시는 대여이력을 월·연 단위 파일로 공개하고 수정합니다. 원천 버전을 불변으로 기록하고 월 단위 내용을 비교해, 원천이 바뀌면 영향받은 월만 무효화합니다.
+
+### `(bike_id, rent_at)`을 원천 기본키로 믿지 않았다
+
+이 조합은 논리적 묶음일 뿐 안정적인 식별자가 아닙니다. 완전 중복과 충돌 그룹을 명시적으로 찾아내고, 충돌 그룹은 임의로 하나를 고르지 않고 출처를 보존한 채 신뢰 데이터에서 제외했습니다.
+
+### 대여소 이력은 관측 시점 기준으로 모델링했다
+
+공식 대여소 파일은 변경 이벤트가 아니라 시점별 스냅샷입니다. `dim_station_history`는 관측된 적용 구간으로 모델링하고, 나중에 관측된 정보를 이전 대여에 소급 적용하지 않습니다.
+
+### 실패한 공개가 기존 결과를 덮지 않게 했다
+
+모든 결과물은 불변 버전으로 만들어 검증한 뒤, 검증이 끝나야 `current` 포인터를 원자적으로 옮깁니다. 재빌드가 실패해도 마지막으로 검증된 결과가 그대로 남습니다.
+
+### 모든 실행 경로가 같은 처리 로직을 쓴다
+
+CLI, 테스트, Airflow가 같은 비즈니스 계층을 호출합니다. Airflow는 일정·의존성·재시도·가시성만 맡고 SQL이나 품질 로직을 다시 구현하지 않아, 기간 재처리와 재시도 결과가 경로마다 달라지지 않습니다.
+
+### DuckDB + Parquet + plain SQL을 골랐다
+
+로컬 분석 배치 작업이라 DuckDB로 단일 노드 분석을 실행하고, 정제 데이터는 Parquet 컬럼형으로 보관하며, fact·dimension·mart 로직은 plain SQL로 두어 그대로 읽고 검토할 수 있게 했습니다.
 
 ```text
-Official Seoul files
-  -> immutable Raw + source manifest/hash
-  -> Python source contract + DQ
-  -> DuckDB canonical processing
-  -> partitioned immutable Clean Parquet + quarantine provenance
-  -> DuckDB fact/dimension warehouse
-  -> plain-SQL station-day / OD / source-quality marts
+서울시 공식 파일
+  -> 불변 Raw + 원천 manifest/해시
+  -> Python 원천 계약 + 품질 검사
+  -> DuckDB 정규화 처리
+  -> 월 파티션 불변 Clean Parquet + 격리 데이터 출처 기록
+  -> DuckDB fact/dimension 웨어하우스
+  -> plain SQL 대여소-일자 / 출발지-도착지 / 원천 품질 마트
 
 Apache Airflow
-  -> schedule / range backfill / failed-month retry / run visibility
-  -> calls the same Python business layer used by CLI and tests
+  -> 일정 / 기간 재처리 / 실패 월 재시도 / 실행 현황
+  -> CLI·테스트와 같은 Python 비즈니스 계층 호출
 ```
 
-The design keeps transformation truth outside the DAG. Airflow coordinates work; it does not reimplement business SQL or DQ logic.
+## 검증 결과
 
-## Verified v1 evidence
-
-| Evidence | Measured result |
+| 항목 | 결과 |
 |---|---:|
-| Clean production coverage | **78 / 78 months** (`2020-01..2026-06`) |
-| Full-period source / Clean rows | **241,350,472 / 241,350,472** |
-| Trusted / quarantined rows | **241,320,806 / 29,666** |
-| Station history | **12 snapshots · 31,986 observations · 14,992 intervals · 3,047 stations** |
-| Representative real warehouse month | `2020-09`: fact **2,811,968** · station-day **60,979** · OD **1,536,122** |
-| Cross-model reconciliation | fact↔station-day, station-day↔OD, quality↔fact **exact match** |
-| Production-sensitive WSL regression | **139 passed, 1 skipped** |
-| Windows lightweight state/control regression | **3 passed** + `compileall` PASS |
+| 정제 처리 범위 | **78 / 78개월** (2020-01 ~ 2026-06) |
+| 원천 / 정제 행 수 | **241,350,472 / 241,350,472** |
+| 신뢰 / 격리 행 수 | **241,320,806 / 29,666** |
+| 대여소 이력 | 스냅샷 12개 · 관측 31,986건 · 적용 구간 14,992개 · 대여소 3,047곳 |
+| 대표 월(2020-09) 웨어하우스 | fact 2,811,968 · 대여소-일자 60,979 · 출발지-도착지 1,536,122 |
+| 모델 간 정합성 | fact↔대여소-일자, 대여소-일자↔출발지-도착지, 품질↔fact **완전 일치** |
+| 회귀 테스트(WSL) | 139 통과 |
 
-Downstream production acceptance is intentionally bounded by the frozen v1 contract: fact, source-quality, and OD have real production evidence across 9 months; station-day has one representative production month. This is evidence coverage, not a claim that every downstream model was materialized for all 78 months. See [Production Validation](docs/production-validation.md) for exact scope and measurements.
+측정 방법과 상세 결과는 [Production Validation](docs/production-validation.md)에 있습니다.
 
-## Key engineering decisions
+## 기술 스택
 
-### Why month is the rebuild unit
+| 영역 | 기술 |
+|---|---|
+| 원천·품질·제어 | Python |
+| 분석 실행 | DuckDB |
+| 저장 | Parquet |
+| 변환 | plain SQL |
+| 오케스트레이션 | Apache Airflow |
 
-Seoul publishes and revises rental history at month/year source boundaries. The pipeline records immutable source versions and compares month-level member content, so an upstream revision can invalidate only the affected months.
+## 실행
 
-### Why `(bike_id, rent_at)` is not treated as a source PK
-
-It is a logical grouping key, not a guaranteed stable identifier. Exact duplicates and conflicting groups are detected explicitly; conflicting groups are preserved for provenance and excluded from trusted facts instead of selecting an arbitrary winner.
-
-### Why observed station history is conservative
-
-The official station files are snapshots, not exact change-event logs. `dim_station_history` therefore models observed applicability intervals and never backfills future observations into earlier trips.
-
-### Why DuckDB + Parquet + plain SQL
-
-The target is a local analytical batch workload. DuckDB provides bounded single-node analytical execution, Parquet gives durable columnar Clean storage, and plain SQL keeps fact/dimension/mart logic inspectable without adding a framework that the v1 requirements do not need.
-
-### Why Airflow
-
-The business layer already supports deterministic month/range execution and retry. Airflow adds scheduling, dependency control, failed-month retry, and run visibility while preserving one implementation path.
-
-### How failed publishes stay safe
-
-Each durable output is built and validated as an immutable version. The mutable `current` pointer moves only after validation succeeds, so a failed rebuild does not replace the last valid published result.
-
-## Data and repository boundary
-
-Large official source files and generated Parquet/DuckDB outputs are not committed. The repository contains:
-
-- pipeline, SQL, Airflow DAG/plugin, and tests
-- synthetic regression fixtures
-- frozen PRD/addenda and production measurements
-- scripts that prepare the official files locally and verify pinned byte size / SHA-256 before use
-
-Official source bytes, generated warehouse state, Airflow metadata/XCom/logs, credentials, and machine-specific runtime paths remain local.
-
-## Reproduce locally
-
-Reference runtime is **Windows host + WSL2/Linux**, with Python >= 3.12. Airflow itself runs in Linux/WSL2.
-
-For a quick source/test checkout:
+Windows 호스트 + WSL2/Linux, Python 3.12 이상에서 실행합니다. Airflow는 Linux/WSL2에서 실행합니다.
 
 ```bash
 python3 -m venv .venv
@@ -97,21 +89,16 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-For the full production replay, source registration, DQ inspection, warehouse/mart queries, retry/idempotency checks, and Airflow commands, follow:
+공식 원천 파일은 저장소에 넣지 않습니다. 준비 스크립트가 공식 파일을 받아 고정된 크기·SHA-256을 확인한 뒤 사용합니다.
+전체 재처리, 원천 등록, 품질 점검, 웨어하우스·마트 조회, 재시도·멱등성 확인, Airflow 명령은 아래 문서를 따릅니다.
 
-- [Implementation & Reproduction Runbook](docs/implementation-and-runbook.md)
+- [구현·재현 런북](docs/implementation-and-runbook.md)
+- [PRD v1.0](docs/prd-v1.0-final.md)
 - [Production Validation](docs/production-validation.md)
 
-The runbook keeps the exhaustive operational commands and contracts out of this landing page while preserving the reproducible path.
+## 만든 사람
 
-## Documentation
+**Jigwan Joe** — Data · Backend
 
-- [PRD v1.0 FINAL](docs/prd-v1.0-final.md) — frozen requirements and Definition of Done
-- [Addendum 001](docs/prd-v1.0-addendum-001-station-history-match-nullability.md) — station-history match nullability
-- [Addendum 002](docs/prd-v1.0-addendum-002-station-observation-precision-and-applicability.md) — station observation precision/applicability
-- [Production Validation](docs/production-validation.md) — production-scale evidence, reconciliation, recovery, and acceptance scope
-- [Implementation & Reproduction Runbook](docs/implementation-and-runbook.md) — CLI contracts, production replay, Airflow setup, manifest and publication details
-
-## Scope
-
-v1 is a batch reliability / DW project. Streaming, real-time bike availability, ML forecasting, recommendation, REST serving, Kubernetes, Spark, dbt, Iceberg, and Delta Lake are outside the frozen v1 requirements.
+- GitHub: [@jgjoe](https://github.com/jgjoe)
+- Email: jigwan.joe@gmail.com
