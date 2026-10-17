@@ -65,7 +65,7 @@ Apache Airflow
 | 대여소 이력 | 스냅샷 12개 · 관측 31,986건 · 적용 구간 14,992개 · 대여소 3,047곳 |
 | 대표 월(2020-09) 웨어하우스 | fact 2,811,968 · 대여소-일자 60,979 · 출발지-도착지 1,536,122 |
 | 모델 간 정합성 | fact↔대여소-일자, 대여소-일자↔출발지-도착지, 품질↔fact **완전 일치** |
-| 회귀 테스트(WSL) | 139 통과 |
+| 최종 production-sensitive 대상 회귀(WSL) | 139 passed, 1 skipped |
 
 측정 방법과 상세 결과는 [Production Validation](docs/production-validation.md)에 있습니다.
 
