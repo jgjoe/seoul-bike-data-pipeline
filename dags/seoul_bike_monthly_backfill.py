@@ -22,10 +22,13 @@ from airflow.sdk import (
 )
 
 from seoul_bike_pipeline.airflow_control import (
+    capture_cloud_payload,
     capture_plan_payload,
     execute_plan_payload,
     finalize_airflow_run_payload,
     resolve_backfill_request,
+    publish_cloud_payload,
+    require_cloud_success_payload,
     retry_failed_payload,
 )
 from seoul_bike_pipeline.backfill_state import backfill_run_result_from_payload
@@ -59,6 +62,11 @@ _TRANSFORMATION_VERSION = os.environ.get(
     max_active_runs=1,
     tags=["seoul-bike", "data-quality", "backfill"],
     params={
+        "cloud": Param(
+            {"enabled": False},
+            type="object",
+            description="Optional bounded cloud publication settings; disabled by default.",
+        ),
         "manifest": Param(
             str(_PROJECT_ROOT / "data" / "source-manifest.json"),
             type="string",
@@ -213,7 +221,29 @@ def seoul_bike_monthly_backfill():
     plan = capture_plan_task(request)
     initial = execute_initial_task(request, plan)
     retry = retry_failed_task(request, plan, initial)
-    require_success_task(request, plan, initial, retry)
+    local_success = require_success_task(request, plan, initial, retry)
+
+    @task(task_id="capture_cloud_plan")
+    def capture_cloud_task(request, local_summary):
+        return capture_cloud_payload(request, get_current_context()["params"]["cloud"], local_summary)
+
+    @task(task_id="publish_cloud", retries=1, retry_delay=timedelta(seconds=5))
+    def publish_cloud_task(captured):
+        return publish_cloud_payload(captured)
+
+    @task(task_id="retry_failed_cloud", retries=1, retry_delay=timedelta(seconds=5))
+    def retry_cloud_task(captured, previous):
+        if previous == {"enabled": False}:
+            return previous
+        return publish_cloud_payload(captured, previous)
+
+    @task(task_id="require_cloud_success")
+    def require_cloud_task(result):
+        return require_cloud_success_payload(result)
+
+    captured_cloud = capture_cloud_task(request, local_success)
+    initial_cloud = publish_cloud_task(captured_cloud)
+    require_cloud_task(retry_cloud_task(captured_cloud, initial_cloud))
 
 
 dag = seoul_bike_monthly_backfill()

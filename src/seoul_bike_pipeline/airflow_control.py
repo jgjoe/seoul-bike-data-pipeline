@@ -47,6 +47,59 @@ from .station_day_mart import plan_station_day_fact_revision_impact
 REQUEST_SCHEMA_VERSION = 1
 
 
+def capture_cloud_payload(request_payload, settings, local_summary):
+    """Optional post-local stage; XCom carries only a bound manifest reference."""
+    from .cloud_publish import CloudConfig, CloudPublishError, capture_cloud_plan, identity
+
+    if settings.get("enabled", False) is False:
+        return {"enabled": False}
+    if settings.get("enabled") is not True:
+        raise CloudPublishError("cloud enabled must be a boolean")
+    request = request_from_payload(request_payload)
+    if (local_summary.get("status") != RUN_SUCCEEDED
+            or local_summary.get("start_month") != request.start_month
+            or local_summary.get("end_month") != request.end_month):
+        raise CloudPublishError("cloud publication requires matching successful local run")
+    plan = capture_cloud_plan(
+        **{key: getattr(request, key) for key in
+           ("manifest", "raw_root", "station_root", "clean_root", "warehouse_root")},
+        export_root=settings["export_root"], months=settings["months"],
+        station_months=settings.get("station_months", []),
+        config=CloudConfig(**settings["config"]),
+    )
+    payload = {"enabled": True, "request_id": request.request_id, "plan_id": plan["plan_id"],
+               "path": str(Path(plan["export_root"]) / f"{plan['plan_id']}.json")}
+    payload["binding"] = identity(payload)
+    return payload
+
+
+def publish_cloud_payload(payload, previous=None, **backends):
+    from .cloud_publish import CloudPublishError, identity, publish_cloud_plan, read_json
+
+    if payload == {"enabled": False}:
+        return {"enabled": False}
+    if payload.get("binding") != identity({key: value for key, value in payload.items() if key != "binding"}):
+        raise CloudPublishError("cloud XCom binding mismatch")
+    plan = read_json(payload["path"])
+    if plan["plan_id"] != payload["plan_id"]:
+        raise CloudPublishError("cloud manifest reference mismatch")
+    # Results contain metrics/job IDs only, never records or file contents.
+    return publish_cloud_plan(plan, previous=previous, **backends)
+
+
+def require_cloud_success_payload(result):
+    from .cloud_publish import CloudPublishError, identity
+
+    if result == {"enabled": False}:
+        return result
+    if result.get("binding") != identity({key: value for key, value in result.items() if key != "binding"}):
+        raise CloudPublishError("cloud result binding mismatch")
+    if result.get("status") != "SUCCEEDED":
+        failures = [(row["table"], row["month"]) for row in result["targets"] if row["status"] == "FAILED"]
+        raise CloudPublishError(f"cloud publication failed: {failures}")
+    return {"status": "SUCCEEDED", "plan_id": result["plan_id"]}
+
+
 @dataclass(frozen=True)
 class AirflowBackfillRequest:
     request_id: str

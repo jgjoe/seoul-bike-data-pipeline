@@ -11,10 +11,49 @@ cd "$ROOT"
 OUTPUT_ROOT="${1:-$ROOT/data/production-sources}"
 TRANSFORMATION_VERSION="${2:-}"
 if [[ -z "$TRANSFORMATION_VERSION" ]]; then
-  echo "usage: $0 [output-root] <transformation-version>" >&2
+  echo "usage: $0 [output-root] <transformation-version> [--months YYYY-MM ...] [--list-only]" >&2
   echo "example: $0 data/production-sources git-<short-commit>" >&2
   exit 2
 fi
+shift 2
+months=()
+list_only=false
+last_month=""
+while (( $# )); do
+  case "$1" in
+    --months)
+      shift
+      if (( $# == 0 )) || [[ "$1" == --* ]]; then
+        echo "--months requires at least one YYYY-MM" >&2
+        exit 2
+      fi
+      while (( $# )) && [[ "$1" != --* ]]; do
+        month="$1"
+        if [[ ! "$month" =~ ^20[0-9]{2}-(0[1-9]|1[0-2])$ ]] \
+          || [[ "$month" < "2020-01" || "$month" > "2026-06" ]] \
+          || [[ " ${months[*]} " == *" $month "* ]]; then
+          echo "invalid or duplicate production month: $month" >&2
+          exit 2
+        fi
+        months+=("$month")
+        if [[ "$month" > "$last_month" ]]; then last_month="$month"; fi
+        shift
+      done
+      ;;
+    --list-only) list_only=true; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+selected_period() {
+  local period="$1"
+  local month
+  if (( ${#months[@]} == 0 )); then return 0; fi
+  for month in "${months[@]}"; do
+    if [[ "$period" == "$month" || "$period" == "${month:0:4}" ]]; then return 0; fi
+  done
+  return 1
+}
 
 PYTHON_BIN="${PYTHON_BIN:-$ROOT/.venv/bin/python}"
 DOWNLOAD_URL="https://datafile.seoul.go.kr/bigfile/iot/inf/nio_download.do?useCache=false"
@@ -29,8 +68,10 @@ RENTAL_DOWNLOADS="$OUTPUT_ROOT/downloads/rental"
 STATION_DOWNLOADS="$OUTPUT_ROOT/downloads/station"
 STATION_PUBLISHED="$OUTPUT_ROOT/station"
 
-mkdir -p "$RENTAL_DOWNLOADS" "$STATION_DOWNLOADS" \
-  "$SOURCE_RAW" "$STATION_PUBLISHED"
+if [[ "$list_only" == false ]]; then
+  mkdir -p "$RENTAL_DOWNLOADS" "$STATION_DOWNLOADS" \
+    "$SOURCE_RAW" "$STATION_PUBLISHED"
+fi
 
 download_checked() {
   local inf_id="$1"
@@ -38,15 +79,17 @@ download_checked() {
   local destination="$3"
   local expected_size="$4"
   local expected_sha256="$5"
-  local tmp="${destination}.part"
+  local inf_seq="$6"
+  local tmp
+  tmp="$(mktemp "${destination}.part.XXXXXX")"
 
-  rm -f "$tmp"
   curl --fail --location --silent --show-error \
-    --retry 3 --retry-delay 2 --retry-all-errors \
+    --retry 1 --retry-delay 2 --connect-timeout 30 --max-time 1800 \
+    --write-out "DOWNLOAD_TRANSFER bytes=%{size_download} seconds=%{time_total}\n" \
     -X POST \
     --data-urlencode "infId=$inf_id" \
     --data-urlencode "seq=$seq" \
-    --data-urlencode "infSeq=1" \
+    --data-urlencode "infSeq=$inf_seq" \
     "$DOWNLOAD_URL" \
     -o "$tmp"
 
@@ -102,9 +145,12 @@ rental_items=(
 
 for entry in "${rental_items[@]}"; do
   IFS='|' read -r seq logical_period local_name expected_size expected_sha256 published_filename <<<"$entry"
+  if ! selected_period "$logical_period"; then continue; fi
+  echo "RENTAL_SELECTED logical_period=$logical_period bytes=$expected_size sha256=$expected_sha256"
+  if [[ "$list_only" == true ]]; then continue; fi
   artifact="$RENTAL_DOWNLOADS/$local_name"
   echo "RENTAL_DOWNLOAD logical_period=$logical_period seq=$seq"
-  download_checked "OA-15182" "$seq" "$artifact" "$expected_size" "$expected_sha256"
+  download_checked "OA-15182" "$seq" "$artifact" "$expected_size" "$expected_sha256" 1
   registration="$(register_source \
     "$artifact" "$SOURCE_MANIFEST" "$SOURCE_RAW" rental_history \
     "$logical_period" "$published_filename" "$RENTAL_SOURCE_URL" "$RENTAL_LICENSE")"
@@ -136,9 +182,17 @@ station_items=(
 
 for entry in "${station_items[@]}"; do
   IFS='|' read -r seq logical_period local_name expected_size expected_sha256 published_filename <<<"$entry"
+  # For pre-2021 trips the first observed snapshot anchors an explicitly
+  # unmatched history; never backfill that future observation into 2020.
+  # Later snapshots cannot affect as-of joins within the selected months.
+  if (( ${#months[@]} )) && [[ "${logical_period:0:7}" > "$last_month" && "$seq" != 11 ]]; then
+    continue
+  fi
+  echo "STATION_SELECTED logical_period=$logical_period bytes=$expected_size sha256=$expected_sha256"
+  if [[ "$list_only" == true ]]; then continue; fi
   artifact="$STATION_DOWNLOADS/$local_name"
   echo "STATION_DOWNLOAD logical_period=$logical_period seq=$seq"
-  download_checked "OA-13252" "$seq" "$artifact" "$expected_size" "$expected_sha256"
+  download_checked "OA-13252" "$seq" "$artifact" "$expected_size" "$expected_sha256" 2
   registration="$(register_source \
     "$artifact" "$SOURCE_MANIFEST" "$SOURCE_RAW" station_snapshot \
     "$logical_period" "$published_filename" "$STATION_SOURCE_URL" "$STATION_LICENSE")"
@@ -154,6 +208,10 @@ for entry in "${station_items[@]}"; do
   rm -f "$artifact"
 done
 
+if [[ "$list_only" == true ]]; then
+  echo "SOURCES_LISTED_ONLY"
+  exit 0
+fi
 echo "PRODUCTION_SOURCES_READY root=$OUTPUT_ROOT"
 echo "manifest=$SOURCE_MANIFEST"
 echo "raw_root=$SOURCE_RAW"

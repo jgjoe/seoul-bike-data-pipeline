@@ -4,6 +4,8 @@
 !.env.example
 /credentials/
 /secrets/
+/data/cloud/
+application_default_credentials.json
 *.pem
 *.key
 *_credentials.json

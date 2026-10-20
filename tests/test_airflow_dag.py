@@ -54,6 +54,10 @@ def test_airflow_dag_structure_uses_explicit_control_plane_stages():
         "execute_initial",
         "retry_failed_months",
         "require_success",
+        "capture_cloud_plan",
+        "publish_cloud",
+        "retry_failed_cloud",
+        "require_cloud_success",
     }
     assert dag.task_dict["capture_plan"].upstream_task_ids == {"resolve_request"}
     assert dag.task_dict["execute_initial"].upstream_task_ids == {
@@ -73,6 +77,11 @@ def test_airflow_dag_structure_uses_explicit_control_plane_stages():
     }
     assert dag.task_dict["execute_initial"].retries == 1
     assert dag.task_dict["retry_failed_months"].retries == 1
+    assert dag.params["cloud"] == {"enabled": False}
+    assert dag.task_dict["capture_cloud_plan"].upstream_task_ids == {"resolve_request", "require_success"}
+    assert dag.task_dict["publish_cloud"].upstream_task_ids == {"capture_cloud_plan"}
+    assert dag.task_dict["retry_failed_cloud"].upstream_task_ids == {"capture_cloud_plan", "publish_cloud"}
+    assert dag.task_dict["require_cloud_success"].upstream_task_ids == {"retry_failed_cloud"}
 
 
 def test_airflow_timetable_includes_june_2026_interval_but_not_july():
