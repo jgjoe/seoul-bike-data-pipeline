@@ -1,5 +1,6 @@
 # Transformation SQL is textual source; keep its checkout representation stable.
 *.sql text eol=lf
+*.sh text eol=lf
 
 # Synthetic fixtures are hashed byte-for-byte by tests; never rewrite line endings.
 tests/fixtures/source/* -text

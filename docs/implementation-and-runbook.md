@@ -1,5 +1,108 @@
 # Seoul Bike Data Pipeline — Implementation & Reproduction Runbook
 
+## Optional representative GCS / BigQuery path
+
+Approved scope: `docs/prd-v1.0-addendum-003-cloud-publication.md`.
+User setup: `docs/cloud-setup-ko.md`. Cloud remains disabled until setup is
+confirmed by the maintainer. Installing optional SDKs is not cloud authentication:
+
+```bash
+.venv/bin/python -m pip install -e '.[test,cloud]'
+.venv/bin/python -m pytest -q
+```
+
+Capture locally (no cloud calls), substituting existing local runtime roots and
+the final bucket name. Example selected months are provisional:
+
+```bash
+.venv/bin/python -m seoul_bike_pipeline cloud plan \
+  --manifest "$RUN_ROOT/source-manifest.json" \
+  --raw-root "$RUN_ROOT/raw" --station-root "$RUN_ROOT/station" \
+  --clean-root "$RUN_ROOT/clean" --warehouse-root "$RUN_ROOT/warehouse" \
+  --export-root "$RUN_ROOT/cloud" --project seoul-bike-dw \
+  --bucket seoul-bike-dw-representative \
+  --months 2020-08 2020-09 --station-months 2020-09
+```
+
+Use the exact manifest path printed as `CLOUD_PLAN`; do not recreate the plan
+for retry. These commands make real cloud calls and require the setup gate:
+
+```bash
+.venv/bin/python -m seoul_bike_pipeline cloud publish \
+  --plan "$CLOUD_PLAN" --result "$RUN_ROOT/cloud/initial-result.json"
+.venv/bin/python -m seoul_bike_pipeline cloud publish \
+  --plan "$CLOUD_PLAN" --retry-result "$RUN_ROOT/cloud/initial-result.json" \
+  --result "$RUN_ROOT/cloud/retry-result.json"
+```
+
+`cloud publish` without `--retry-result` also safely recovers from durable
+BigQuery history if the local result file was lost. Nonzero means failure,
+not partially successful acceptance. Save both result artifacts.
+Exports/manifests/results are generated runtime state, not Git inputs.
+Use a shared export root for publications to one target bucket/dataset;
+distributed concurrent writers are outside this representative contract.
+
+For the approved bounded replay after runtime loss, publish station history
+and date once, then call the existing individual Clean/fact/quality/OD CLI
+publishers sequentially for `2020-08` and `2020-09`. Do not invoke the full
+`backfill-range` station-day phase: September station-day requires fact
+current pointers for all January–September months, outside this replay scope.
+Omit `--station-months` from the cloud plan for this bounded run. This preserves
+the existing completeness contract instead of publishing a partial station-day.
+
+The live acceptance harness below uses the same business layer and writes
+plans, before/after metrics and all job IDs outside Git. Run it only after
+the local reference count assertions and full offline regression have passed:
+
+```bash
+.venv-airflow/bin/python scripts/verify-cloud-publication.py production \
+  --root "$HOME/seoul-bike-production-replay"
+.venv-airflow/bin/python scripts/verify-cloud-publication.py synthetic \
+  --root "$HOME/seoul-bike-production-replay"
+```
+
+The synthetic phase uses test-fixture helpers from the `[test]` environment:
+`verify_*` tables/history and `v1/verification/` objects, never production
+revisions. It checks failed-load partition preservation, changed-February-only
+loads and recovery after an interrupted success-history write. No resources
+are deleted by the harness. Evidence is under `run/cloud/` and
+`run/cloud-verification/` respectively. A failed phase is not acceptance.
+
+Airflow preserves the existing local stages. Four optional post-success tasks
+call the same business functions. Default Param is `"cloud": {"enabled": false}`.
+Example enabled Param:
+
+```json
+{
+  "cloud": {
+    "enabled": true,
+    "months": ["2020-08", "2020-09"],
+    "station_months": ["2020-09"],
+    "export_root": "/absolute/runtime/cloud",
+    "config": {
+      "project": "seoul-bike-dw",
+      "bucket": "seoul-bike-dw-representative",
+      "dataset": "bike_cloud"
+    }
+  }
+}
+```
+
+Settings contain no credentials. XCom carries a bound manifest reference and
+small job/verification results. Local UNCHANGED never implies cloud SKIP:
+cloud history decides. Failed cloud targets retry without rebuilding local data.
+
+Study topics: object storage vs DW; partitioning vs clustering; batch load vs
+streaming; partition replacement vs MERGE; source/artifact/job identity;
+idempotent recovery; IAM scope/ADC impersonation; DQ quarantine vs warnings;
+budget alerts vs query limits; trial credits vs actual billed cost.
+
+Interview prompts:
+1. Why partition overwrite instead of MERGE with a non-PK logical trip key?
+2. How do you recover a successful load whose success-history response was lost?
+3. How did you verify equivalence and cost, and what production guarantees does
+   a two-month demonstration not establish?
+
 This document preserves the detailed CLI, storage, publication, production replay, Airflow, and manifest contracts. For the recruiter-first project overview and measured evidence, start with [the repository README](../README.md).
 
 서울 따릉이 대여이력의 source revision, schema drift, data quality, backfill, provenance를 다루는 로컬 batch data reliability / DW pipeline이다. 구현 기준선은 [PRD v1.0 FINAL](prd-v1.0-final.md)이다.
@@ -238,6 +341,18 @@ export SEOUL_BIKE_TRANSFORMATION_VERSION=<explicit-code-version>
 
 최종 workstation validation에서는 WSL2를 `memory=10GB`, `processors=4`로 제한하고 heavy publisher를 한 번에 하나만 실행했다. 이 값 자체가 business contract는 아니지만, 여러 production-scale DuckDB publisher를 동시에 실행해 Windows host를 굶기지 않는 것이 권장 운영 방식이다. 실제 측정 결과와 완료 증거는 `docs/production-validation.md`에 기록한다.
 
+대표 cloud 재현에서는 아래 전체 기간 명령 대신 준비 스크립트에
+`--months 2020-08 2020-09`를 전달하고, backfill 시작/종료도 각각 `2020-08`,
+`2020-09`로 제한한다. `--list-only`를 추가하면 네트워크/파일 생성 없이
+선택된 원천의 고정 size/SHA-256을 확인할 수 있다. 2020년 대여 원천은
+공식 연간 ZIP 한 개(1,022,004,940 bytes) 단위로 pin되어 있어 ZIP 전체가
+필요하지만 Clean/fact/mart는 선택한 두 달만 빌드한다. 2021년 이후 rental
+파일은 다운로드하지 않는다. 2020년의 관측 이전 unmatched 계약에는 첫 대여소
+snapshot(2021-01-31, 206,960 bytes)만 사용하고 미래 관측을 과거에 채우지 않는다.
+필터 없는 기존 full replay는 그대로 유지된다. 첫 snapshot만 사용한 history의
+version/interval 수는 전체 12개 snapshot history와 다르며, 2020년 as-of 결과는
+동일해야 한다. 모든 size/hash 불일치는 자동 대체 없이 즉시 중단한다.
+
 ```bash
 # Fresh Ubuntu/WSL2 image only; skip when `python3 -m venv` already works.
 sudo apt-get update
@@ -365,7 +480,7 @@ Row-level canonicalization은 source-facing provenance를 유지하면서 `bike_
 
 Warehouse publication은 `warehouse/versions/history_version_id=wh1_.../warehouse.duckdb`와 deterministic `metadata.json`을 immutable하게 보존하고 `warehouse/current.json`만 atomic replace한다. Version identity에는 ordered station snapshot lineage, transformation/config identity, SQL SHA-256이 포함된다. Validator는 DuckDB schema/count/interval overlap뿐 아니라 metadata가 가리키는 각 immutable station version을 Raw까지 재검증하고, Python으로 interval을 독립 재계산해 SQL 결과와 exact 비교한다. Build 중 station current pointer가 바뀌거나 pre-current bundle이 훼손되면 기존 warehouse current는 유지한다.
 
-SQL SHA-256은 UTF-8 text의 line ending을 LF로 canonicalize한 뒤 계산하므로 Windows CRLF checkout과 WSL2 LF checkout이 같은 transformation identity를 만든다. PRD §25의 v1 mutation/runtime contract는 **WSL2 Linux 단일 runtime**이다. Windows-native pytest/CLI compatibility는 유지하지만, 같은 NTFS worktree에 대해 Windows native process와 WSL process가 동시에 publish하는 cross-OS writer concurrency는 v1 보장 범위가 아니다. Current-set/history advisory lock의 correctness guarantee는 같은 supported runtime/OS lock namespace 안의 concurrent writers에 적용한다.
+SQL SHA-256은 UTF-8 text의 line ending을 LF로 canonicalize한 뒤 계산하므로 Windows CRLF checkout과 WSL2 LF checkout이 같은 transformation identity를 만든다. PRD §25의 v1 mutation/runtime contract는 **WSL2 Linux 단일 runtime**이다. Windows-native pytest/CLI compatibility는 유지하지만, 같은 NTFS checkout에 대해 Windows native process와 WSL process가 동시에 publish하는 cross-OS writer concurrency는 v1 보장 범위가 아니다. Current-set/history advisory lock의 correctness guarantee는 같은 supported runtime/OS lock namespace 안의 concurrent writers에 적용한다.
 
 `warehouse evaluate-station-enrichment`는 current Clean month와 current `dim_station_history`의 immutable version을 먼저 hard-validate한 뒤 `rent_station_no` + `DATE(rent_at)` 기준 half-open temporal join을 수행한다. Canonical contract의 singular `station_history_match`는 v1에서 **필수 rental/origin station**에 대해 평가한다. Return station 정보는 source-facing canonical value로 그대로 유지하며 return-side temporal enrichment는 이 slice의 범위가 아니다. Applicable interval이 있으면 `true`, 첫 observation 이전·observation gap·never-seen station이면 `false`이고 `station_history_unmatched` WARNING을 추가한다. Future interval은 match에 사용하지 않으며 SQL 결과에 future applicability가 나타나면 hard fail한다. 기존 WARNING과 새 station WARNING을 합쳐 distinct WARNING rule 기준 `dq_warning_count`를 다시 계산하지만, unmatched WARNING은 `trusted_fact_eligible`을 false로 바꾸지 않는다. Quarantined Clean row는 trusted enrichment 후보에서 제외된다.
 

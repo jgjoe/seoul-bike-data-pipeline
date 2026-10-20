@@ -14,6 +14,7 @@
 - **부분 재처리** — 원천이 바뀌면 영향받은 월만 탐지해 다시 빌드, 실패한 월만 재시도
 - **웨어하우스·마트** — DuckDB fact/dimension과 대여소-일자·출발지-도착지·원천 품질 마트를 plain SQL로 생성
 - **오케스트레이션** — Apache Airflow로 일정 실행, 기간 재처리, 실패 월 재시도, 실행 현황 확인
+- **대표 클라우드 경로** — 2020-08/09 Clean·Trusted Parquet를 GCS에 보관하고 BigQuery fact·OD·품질 마트를 적재, 재실행·부분 재적재·실패 복구 검증
 
 ## 설계 판단
 
@@ -95,6 +96,8 @@ python3 -m venv .venv
 - [구현·재현 런북](docs/implementation-and-runbook.md)
 - [PRD v1.0](docs/prd-v1.0-final.md)
 - [Production Validation](docs/production-validation.md)
+- [대표 GCS·BigQuery 경로와 검증 범위](docs/prd-v1.0-addendum-003-cloud-publication.md) — 2020-08/09 fact·OD·품질 검증 완료, 실제 청구 비용 확인은 별도
+- [클라우드 사용자 설정 가이드](docs/cloud-setup-ko.md) — 키 없는 WSL ADC와 리소스별 최소 권한
 
 ## 만든 사람
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -164,10 +165,15 @@ def evaluate_trip_station_enrichment(
     else:
         sql_text, sql_sha256 = _canonicalize_sql_text(sql_text)
 
+    spill = tempfile.TemporaryDirectory(prefix="bike-enrichment-")
     connection = duckdb.connect(
         config={
             "memory_limit": "3GB",
             "threads": "2",
+            # Independent in-memory DuckDB instances otherwise share .tmp
+            # filenames. Nested input validators can overwrite/remove active
+            # enrichment spill files even with one publisher process.
+            "temp_directory": spill.name,
         }
     )
     try:
@@ -270,6 +276,7 @@ def evaluate_trip_station_enrichment(
         ) from exc
     finally:
         connection.close()
+        spill.cleanup()
 
     return TripStationEnrichmentSummary(
         source_month=source_month,

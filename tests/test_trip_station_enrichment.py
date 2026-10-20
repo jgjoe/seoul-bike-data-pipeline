@@ -599,3 +599,46 @@ def test_clean_persisted_rows_remain_unenriched_after_evaluation(tmp_path):
     finally:
         connection.close()
     assert evaluated == 0
+
+
+def test_nested_validator_spill_cannot_corrupt_active_enrichment(tmp_path, monkeypatch):
+    clean, history = build_fixture(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    original_contract = trip_station_enrichment._require_pre_enrichment_contract
+    original_recheck = trip_station_enrichment._require_inputs_unchanged
+    active = {}
+
+    def force_active_spill(connection):
+        original_contract(connection)
+        connection.execute("SET memory_limit='16MB'")
+        connection.execute(
+            "CREATE TABLE spill_probe AS SELECT i, repeat(md5(i::VARCHAR),32) payload "
+            "FROM range(30000) t(i)"
+        )
+        active["connection"] = connection
+        active["directory"] = Path(connection.execute("SELECT current_setting('temp_directory')").fetchone()[0])
+        assert list(active["directory"].glob("*"))
+
+    def spill_nested_validator(**kwargs):
+        original_recheck(**kwargs)
+        with duckdb.connect(config={"memory_limit": "16MB", "threads": "2"}) as other:
+            other.execute(
+                "CREATE TABLE nested_probe AS SELECT i, repeat(md5((i+1)::VARCHAR),32) payload "
+                "FROM range(30000) t(i)"
+            )
+        # An independent invariant, not a value derived from the result:
+        # 30,000 rows, each containing exactly 32 copies of a 32-char MD5.
+        assert active["connection"].execute(
+            "SELECT sum(length(payload)) FROM spill_probe"
+        ).fetchone()[0] == 30000 * 32 * 32
+        active["rechecked"] = True
+
+    monkeypatch.setattr(trip_station_enrichment, "_require_pre_enrichment_contract", force_active_spill)
+    monkeypatch.setattr(trip_station_enrichment, "_require_inputs_unchanged", spill_nested_validator)
+    evaluate_trip_station_enrichment(
+        manifest=tmp_path / "manifest.json", raw_root=tmp_path / "raw",
+        station_root=tmp_path / "station", clean_version_path=clean.clean_version_path,
+        station_history_version_path=history.version_path,
+    )
+    assert active["rechecked"]
+    assert not active["directory"].exists()

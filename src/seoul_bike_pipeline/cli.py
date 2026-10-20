@@ -46,6 +46,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    cloud = commands.add_parser("cloud", help="optional bounded GCS/BigQuery publication")
+    cloud_commands = cloud.add_subparsers(dest="cloud_command", required=True)
+    cloud_plan = cloud_commands.add_parser("plan", help="validate/export locally; no cloud calls")
+    for name in ("manifest", "raw-root", "station-root", "clean-root", "warehouse-root", "export-root"):
+        cloud_plan.add_argument("--" + name, type=Path, required=True)
+    cloud_plan.add_argument("--project", default="seoul-bike-dw")
+    cloud_plan.add_argument("--bucket", required=True)
+    cloud_plan.add_argument("--dataset", default="bike_cloud")
+    cloud_plan.add_argument("--months", nargs="+", required=True)
+    cloud_plan.add_argument("--station-months", nargs="*", default=[])
+    cloud_plan.add_argument("--maximum-upload-bytes", type=int, default=4_000_000_000)
+    cloud_plan.add_argument("--maximum-bytes-billed", type=int, default=1024**3)
+    cloud_load = cloud_commands.add_parser("publish", help="publish or recover an exact captured plan")
+    cloud_load.add_argument("--plan", type=Path, required=True)
+    cloud_load.add_argument("--result", type=Path, required=True)
+    cloud_load.add_argument("--retry-result", type=Path)
+
     source = commands.add_parser("source", help="source artifact operations")
     source_commands = source.add_subparsers(dest="source_command", required=True)
 
@@ -578,6 +595,31 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "cloud":
+            from .cloud_publish import (
+                CloudConfig, capture_cloud_plan, publish_cloud_plan, read_json, write_json,
+            )
+            if args.cloud_command == "plan":
+                plan = capture_cloud_plan(
+                    **{name: getattr(args, name) for name in (
+                        "manifest", "raw_root", "station_root", "clean_root", "warehouse_root", "export_root"
+                    )},
+                    months=args.months, station_months=args.station_months,
+                    config=CloudConfig(
+                        project=args.project, bucket=args.bucket, dataset=args.dataset,
+                        maximum_upload_bytes=args.maximum_upload_bytes,
+                        maximum_bytes_billed=args.maximum_bytes_billed,
+                    ),
+                )
+                print(f"CLOUD_PLAN {args.export_root / (plan['plan_id'] + '.json')}")
+                return 0
+            result = publish_cloud_plan(
+                read_json(args.plan),
+                previous=read_json(args.retry_result) if args.retry_result else None,
+            )
+            write_json(args.result, result)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0 if result["status"] == "SUCCEEDED" else 1
         if args.command == "pipeline":
             if args.pipeline_command == "backfill-range":
                 try:

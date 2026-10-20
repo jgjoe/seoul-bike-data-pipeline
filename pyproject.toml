@@ -12,6 +12,7 @@ dependencies = ["duckdb==1.5.5"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+cloud = ["google-cloud-storage>=3,<4", "google-cloud-bigquery>=3.38,<4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
